@@ -5,102 +5,16 @@
 #include <cmath>
 #include <cstdio>
 
-struct __align__(8) Point3D {
-    int x, y, z;
-
-    __host__ __device__ Point3D(int _x = 0, int _y = 0, int _z = 0) : x(_x), y(_y), z(_z) {}
-
-    __host__ __device__ bool operator==(const Point3D& other) const {
-        return x == other.x && y == other.y && z == other.z;
-    }
-
-    __host__ __device__ bool operator!=(const Point3D& other) const {
-        return !(*this == other);
-    }
-
-    __host__ __device__ Point3D operator+(const Point3D& other) const {
-        return Point3D(x + other.x, y + other.y, z + other.z);
-    }
-
-    __host__ __device__ Point3D operator-(const Point3D& other) const {
-        return Point3D(x - other.x, y - other.y, z - other.z);
-    }
-
-    __host__ __device__ bool operator<(const Point3D& other) const {
-        if (x != other.x) return x < other.x;
-        if (y != other.y) return y < other.y;
-        return z < other.z;
-    }
-};
-
-struct __align__(16) EMS {
-    Point3D min_corner;
-    Point3D max_corner;
-
-    __host__ __device__ EMS(Point3D min = Point3D(), Point3D max = Point3D()) : min_corner(min), max_corner(max) {}
-
-    __host__ __device__ bool operator==(const EMS& other) const {
-        return min_corner == other.min_corner && max_corner == other.max_corner;
-    }
-};
+#include "cuda_structures.cuh"
 
 __host__ __device__ bool overlapped(EMS ems1, EMS ems2);
 __host__ __device__ bool inscribed(EMS ems1, EMS ems2);
 __host__ __device__ Point3D orient(Point3D box, int BO);
 __host__ __device__ bool fit_in(Point3D box, EMS ems);
 
-#define MAX_BOXES 1000
-#define MAX_EMSS_PER_BIN 200
-#define MAX_LOADED_ITEMS_PER_BIN MAX_BOXES
-#define MAX_BINS_PER_INDIVIDUAL 500
-
-struct __align__(8) Bin {
-    Point3D dimensions;
-    EMS EMSs[MAX_EMSS_PER_BIN];
-    int num_EMSs;
-    EMS loaded_items[MAX_LOADED_ITEMS_PER_BIN];
-    int num_loaded_items;
-};
-
-struct __align__(8) PlacementProcedure {
-    Bin* Bins_ptr;
-    int num_bins_allocated;
-    Point3D* boxes;
-    int num_boxes;
-    int* BPS;
-    int num_BPS;
-    double* VBO;
-    int num_VBO;
-    int num_opened_bins;
-};
-
-struct PlacementProcedure_setup {
-    Point3D* boxes;
-    int num_boxes;
-    int* BPS_all;
-    int num_BPS;
-    double* VBO_all;
-    int num_VBO;
-    Point3D initial_bin_dim;
-    Bin* all_bins_pool;
-};
-
-Point3D* d_input_boxes_global = nullptr;
-int* d_all_BPS_global = nullptr;
-double* d_all_VBO_global = nullptr;
-PlacementProcedure* d_pp_individuals_global = nullptr;
-double* d_fitness_list_global = nullptr;
-Bin* d_all_bins_pool_global = nullptr;
-
 #define CUDA_CHECK(err) { \
     if (err != cudaSuccess) { \
         fprintf(stderr, "CUDA Error: %s at %s:%d\n", cudaGetErrorString(err), __FILE__, __LINE__); \
-        if (d_input_boxes_global) cudaFree(d_input_boxes_global); \
-        if (d_all_BPS_global) cudaFree(d_all_BPS_global); \
-        if (d_all_VBO_global) cudaFree(d_all_VBO_global); \
-        if (d_pp_individuals_global) cudaFree(d_pp_individuals_global); \
-        if (d_fitness_list_global) cudaFree(d_fitness_list_global); \
-        if (d_all_bins_pool_global) cudaFree(d_all_bins_pool_global); \
         return; \
     } \
 }
@@ -383,114 +297,76 @@ __global__ void placement_kernel(PlacementProcedure* d_pp_individuals, double* d
     d_fitness_output[individual_idx] = evaluate(pp);
 }
 
-void calculate_fitness(const std::vector<Point3D_CPU>& input_boxes, const std::vector<Point3D_CPU>& input_bins_dims,
-                           const std::vector<std::vector<double>>& population, std::vector<double>& fitness_list) {
-    int num_individuals = population.size();
-    int num_gene = population[0].size();
-    int num_input_boxes = input_boxes.size();
+__global__ void sort_bps_kernel(double* d_population, int* d_BPS_output, int num_individuals, int num_gene, int num_boxes) {
+    int individual_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (individual_idx >= num_individuals) return;
 
+    double* solution = d_population + individual_idx * num_gene;
+    int* bps_output = d_BPS_output + individual_idx * num_boxes;
 
-    const int BATCH_SIZE = 100;
-    int num_batches = (num_individuals + BATCH_SIZE - 1) / BATCH_SIZE;
-
-    fitness_list.resize(num_individuals);
-
-    Point3D* d_input_boxes = nullptr;
-    cudaError_t err = cudaMalloc(&d_input_boxes, num_input_boxes * sizeof(Point3D));
-    CUDA_CHECK(err);
-    std::vector<Point3D> h_input_boxes(num_input_boxes);
-    for(int i=0; i<num_input_boxes; ++i) {
-        h_input_boxes[i] = Point3D(input_boxes[i].x, input_boxes[i].y, input_boxes[i].z);
+    int indices[MAX_BOXES];
+    for (int i = 0; i < num_boxes; ++i) {
+        indices[i] = i;
     }
-    err = cudaMemcpy(d_input_boxes, h_input_boxes.data(), num_input_boxes * sizeof(Point3D), cudaMemcpyHostToDevice);
-    CUDA_CHECK(err);
 
-    int* d_batch_BPS = nullptr;
-    double* d_batch_VBO = nullptr;
-    PlacementProcedure* d_batch_pp_individuals = nullptr;
-    double* d_batch_fitness_list = nullptr;
-    Bin* d_batch_bins_pool = nullptr;
+    double alleles[MAX_BOXES];
+    for (int i = 0; i < num_boxes; ++i) {
+        alleles[i] = solution[i];
+    }
 
-    size_t max_batch_bps_size = (size_t)BATCH_SIZE * num_input_boxes * sizeof(int);
-    size_t max_batch_vbo_size = (size_t)BATCH_SIZE * (num_gene - num_input_boxes) * sizeof(double);
-    size_t max_batch_pp_individuals_size = (size_t)BATCH_SIZE * sizeof(PlacementProcedure);
-    size_t max_batch_fitness_list_size = (size_t)BATCH_SIZE * sizeof(double);
-    size_t max_batch_bins_pool_size = (size_t)BATCH_SIZE * MAX_BINS_PER_INDIVIDUAL * sizeof(Bin);
-
-    err = cudaMalloc(&d_batch_BPS, max_batch_bps_size);
-    CUDA_CHECK(err);
-    err = cudaMalloc(&d_batch_VBO, max_batch_vbo_size);
-    CUDA_CHECK(err);
-    err = cudaMalloc(&d_batch_pp_individuals, max_batch_pp_individuals_size);
-    CUDA_CHECK(err);
-    err = cudaMalloc(&d_batch_fitness_list, max_batch_fitness_list_size);
-    CUDA_CHECK(err);
-    err = cudaMalloc(&d_batch_bins_pool, max_batch_bins_pool_size);
-    CUDA_CHECK(err);
-
-    for (int batch_idx = 0; batch_idx < num_batches; ++batch_idx) {
-        int current_batch_start_idx = batch_idx * BATCH_SIZE;
-        int current_batch_size = std::min(BATCH_SIZE, num_individuals - current_batch_start_idx);
-
-        std::vector<int> h_batch_BPS(current_batch_size * num_input_boxes);
-        std::vector<double> h_batch_VBO(current_batch_size * (num_gene - num_input_boxes));
-
-        for (int i = 0; i < current_batch_size; ++i) {
-            const std::vector<double>& solution = population[current_batch_start_idx + i];
-            std::vector<std::pair<double, int>> indexed_solution_bps(num_input_boxes);
-            for (int j = 0; j < num_input_boxes; ++j) {
-                indexed_solution_bps[j] = {solution[j], j};
-            }
-            std::sort(indexed_solution_bps.begin(), indexed_solution_bps.end());
-            
-            for (int j = 0; j < num_input_boxes; ++j) {
-                h_batch_BPS[i * num_input_boxes + j] = indexed_solution_bps[j].second;
-            }
-
-            for (int j = 0; j < (num_gene - num_input_boxes); ++j) {
-                h_batch_VBO[i * (num_gene - num_input_boxes) + j] = solution[num_input_boxes + j];
+    for (int i = 0; i < num_boxes - 1; ++i) {
+        for (int j = 0; j < num_boxes - i - 1; ++j) {
+            if (alleles[j] > alleles[j + 1]) {
+                double temp_allele = alleles[j];
+                alleles[j] = alleles[j + 1];
+                alleles[j + 1] = temp_allele;
+                int temp_index = indices[j];
+                indices[j] = indices[j + 1];
+                indices[j + 1] = temp_index;
             }
         }
-
-        err = cudaMemcpy(d_batch_BPS, h_batch_BPS.data(), current_batch_size * num_input_boxes * sizeof(int), cudaMemcpyHostToDevice);
-        CUDA_CHECK(err);
-        err = cudaMemcpy(d_batch_VBO, h_batch_VBO.data(), current_batch_size * (num_gene - num_input_boxes) * sizeof(double), cudaMemcpyHostToDevice);
-        CUDA_CHECK(err);
-
-        PlacementProcedure_setup setup;
-        setup.boxes = d_input_boxes;
-        setup.num_boxes = num_input_boxes;
-        setup.BPS_all = d_batch_BPS;
-        setup.num_BPS = num_input_boxes;
-        setup.VBO_all = d_batch_VBO;
-        setup.num_VBO = num_gene - num_input_boxes;
-        setup.initial_bin_dim = Point3D(input_bins_dims[0].x, input_bins_dims[0].y, input_bins_dims[0].z);
-        setup.all_bins_pool = d_batch_bins_pool;
-
-        int threadsPerBlock = 256;
-        int blocksPerGrid = (current_batch_size + threadsPerBlock - 1) / threadsPerBlock;
-
-        initialize_placement_kernel<<<blocksPerGrid, threadsPerBlock>>>(d_batch_pp_individuals, setup, current_batch_size);
-        err = cudaGetLastError();
-        CUDA_CHECK(err);
-        err = cudaDeviceSynchronize();
-        CUDA_CHECK(err);
-
-        placement_kernel<<<blocksPerGrid, threadsPerBlock>>>(d_batch_pp_individuals, d_batch_fitness_list, current_batch_size);
-        err = cudaGetLastError();
-        CUDA_CHECK(err);
-        err = cudaDeviceSynchronize();
-        CUDA_CHECK(err);
-
-        err = cudaMemcpy(fitness_list.data() + current_batch_start_idx, d_batch_fitness_list, current_batch_size * sizeof(double), cudaMemcpyDeviceToHost);
-        CUDA_CHECK(err);
     }
 
-    cudaFree(d_batch_BPS);
-    cudaFree(d_batch_VBO);
-    cudaFree(d_batch_pp_individuals);
-    cudaFree(d_batch_fitness_list);
-    cudaFree(d_batch_bins_pool);
-    cudaFree(d_input_boxes);
+    for (int i = 0; i < num_boxes; ++i) {
+        bps_output[i] = indices[i];
+    }
 }
+
+void calculate_fitness_cuda(const std::vector<Point3D_CPU>& input_boxes, 
+                            const std::vector<Point3D_CPU>& input_bins_dims,
+                            double* d_population, 
+                            double* d_fitness_list, 
+                            int num_individuals, 
+                            int num_gene,
+                            Point3D* d_input_boxes_global,
+                            int* d_all_BPS_global,
+                            PlacementProcedure* d_pp_individuals_global,
+                            Bin* d_all_bins_pool_global) {
+    int num_input_boxes = input_boxes.size();
+    int num_vbo_alleles = num_gene - num_input_boxes;
+    int threadsPerBlock = 256;
+    int blocksPerGrid = (num_individuals + threadsPerBlock - 1) / threadsPerBlock;
+    sort_bps_kernel<<<blocksPerGrid, threadsPerBlock>>>(d_population, d_all_BPS_global, num_individuals, num_gene, num_input_boxes);
+    CUDA_CHECK(cudaGetLastError());
+    cudaDeviceSynchronize();
+
+    PlacementProcedure_setup setup;
+    setup.boxes = d_input_boxes_global;
+    setup.num_boxes = num_input_boxes;
+    setup.BPS_all = d_all_BPS_global;
+    setup.num_BPS = num_input_boxes;
+    setup.VBO_all = d_population + num_input_boxes;
+    setup.num_VBO = num_vbo_alleles;
+    setup.initial_bin_dim = Point3D(input_bins_dims[0].x, input_bins_dims[0].y, input_bins_dims[0].z);
+    setup.all_bins_pool = d_all_bins_pool_global;
+
+    initialize_placement_kernel<<<blocksPerGrid, threadsPerBlock>>>(d_pp_individuals_global, setup, num_individuals);
+    CUDA_CHECK(cudaGetLastError());
+    cudaDeviceSynchronize();
+
+    placement_kernel<<<blocksPerGrid, threadsPerBlock>>>(d_pp_individuals_global, d_fitness_list, num_individuals);
+    CUDA_CHECK(cudaGetLastError());
+    cudaDeviceSynchronize();
+}
+
 

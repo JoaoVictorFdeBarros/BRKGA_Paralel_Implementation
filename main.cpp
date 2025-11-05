@@ -1,4 +1,5 @@
 #include "BinPacking3D.hpp"
+#include "BRKGA_GPU.hpp"
 #include <iostream>
 #include <string>
 #include <sstream>
@@ -58,25 +59,20 @@ void print_instances(const std::vector<Point3D_CPU>& boxes) {
     std::cout << "-------------------------------------------------------------------------------\n";
 }
 
-void print_results(const BRKGA& algorithm) {
+void print_results(const std::string& result) {
     std::cout << "\n\n----------------------------------RESULTADOS-----------------------------------\n";
-    std::cout << "Bins utilizados: " << algorithm.used_bins << "\n";
-    std::cout << "Melhor fitness:  " << std::fixed << std::setprecision(6) << algorithm.best_fitness << "\n";
-    
-    if (!algorithm.history_min.empty()) {
-        std::cout << "Melhoria:    " << std::fixed << std::setprecision(6) << (algorithm.history_min[0] - algorithm.history_min.back()) << "\n";
-    }
+    std::cout << result << "\n";
 }
 
 int main(int argc, char* argv[]) {
 
-    int N = 100;
-    int num_generations = 200;
-    int num_individuals = 30*N;
+    int N = 200;
+    int num_generations = 5000;
+    int num_individuals = 10*N; 
     int num_elites = num_individuals*0.1;
     int num_mutants = num_individuals*0.15;
-    double eliteCProb = 0.7;
-    int patience = 10;
+    double eliteCProb = 0.75;
+    int patience = 200;
     int type = 1;
     
     for (int i = 1; i < argc; ++i) {
@@ -87,7 +83,7 @@ int main(int argc, char* argv[]) {
             return 0;
         } else if (arg == "-n" && i + 1 < argc) {
             N = std::stoi(argv[++i]);
-            num_individuals = 30*N;
+            num_individuals = 10*N;
             num_elites = num_individuals*0.1;
             num_mutants = num_individuals*0.15;
         } else if (arg == "-g" && i + 1 < argc) {
@@ -129,24 +125,12 @@ int main(int argc, char* argv[]) {
 
     print_instances(boxes);
 
-    BRKGA algorithm(boxes, bins_dims, num_generations, num_individuals, num_elites, num_mutants, eliteCProb);
+    BRKGA_GPU algorithm(boxes, bins_dims, num_generations, num_individuals, num_elites, num_mutants, eliteCProb);
     std::string result = algorithm.fit(patience);
 
-    print_results(algorithm);
+    print_results(result);
 
-    // if (!algorithm.best_solution.empty()) {
-    //     std::cout << "----------------------------------USO-DOS-BINS-----------------------------------\n";
-    //     PlacementProcedure final_placement(boxes, bins_dims, algorithm.best_solution);
 
-    //     for (int i = 0; i < final_placement.num_opened_bins; ++i) {
-    //         double load = final_placement.Bins[i].load();
-    //         std::cout << std::fixed << std::setprecision(2) << (load * 100) << "% | ";
-    //         if(!((i+1)%5)){
-    //             std::cout << '\n';
-    //         }
-    //     }
-    //     std::cout << "\n-------------------------------------------------------------------------------\n\n";
-    // }
 
     return 0;
 }

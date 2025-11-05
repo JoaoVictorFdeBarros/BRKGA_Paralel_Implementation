@@ -1,22 +1,30 @@
-CXX = g++
-CXXFLAGS = -std=c++17 -Wall -Wextra -O2 -g
-
 NVCC = nvcc
-NVCCFLAGS = -std=c++14 -arch=sm_75
+CXX = g++
+
+STD_FLAG_HOST = -std=c++14
+STD_FLAG_NVCC = -std=c++14
+
+NVCCFLAGS = -arch=sm_75 $(STD_FLAG_NVCC) --expt-relaxed-constexpr --expt-extended-lambda -ccbin g++-10
+
+CXXFLAGS = $(STD_FLAG_HOST) -Wall -Wextra -O2
 
 TARGET = BRKGA
-SOURCES_CPP = main.cpp BinPacking3D.cpp
-SOURCES_CUDA = BinPacking3D_cuda.cu
 
-OBJECTS_CPP = $(SOURCES_CPP:.cpp=.o)
-OBJECTS_CUDA = $(SOURCES_CUDA:.cu=.o)
+CPP_SRCS = main.cpp BinPacking3D.cpp
+CU_SRCS = BinPacking3D_cuda.cu BRKGA_GPU.cu
+
+CPP_OBJS = $(CPP_SRCS:.cpp=.o)
+CU_OBJS = $(CU_SRCS:.cu=.o)
+OBJS = $(CPP_OBJS) $(CU_OBJS)
+
+LDFLAGS = -lcudart
 
 .PHONY: all clean
 
 all: $(TARGET)
 
-BRKGA: $(OBJECTS_CPP) BinPacking3D_cuda.o
-	$(CXX) $(CXXFLAGS) -o $@ $(OBJECTS_CPP) BinPacking3D_cuda.o -L/usr/local/cuda/lib64 -lcudart
+$(TARGET): $(OBJS)
+	$(NVCC) $(NVCCFLAGS) -o $(TARGET) $(OBJS) $(LDFLAGS)
 
 %.o: %.cpp
 	$(CXX) $(CXXFLAGS) -c $< -o $@
@@ -25,6 +33,5 @@ BRKGA: $(OBJECTS_CPP) BinPacking3D_cuda.o
 	$(NVCC) $(NVCCFLAGS) -c $< -o $@
 
 clean:
-	rm -f $(OBJECTS_CPP) $(OBJECTS_CUDA) $(TARGET)
+	rm -f $(OBJS) $(TARGET)
 	@echo "Limpeza concluída!"
-
