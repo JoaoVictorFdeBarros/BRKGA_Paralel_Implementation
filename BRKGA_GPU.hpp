@@ -39,4 +39,4 @@ private:
     void partition();
 };
 
-#endif // BRKGA_GPU_HPP
+#endif
